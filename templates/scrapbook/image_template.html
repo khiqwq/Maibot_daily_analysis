@@ -5,12 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>五彩斑斓的一天,来看看群里发生了什么吧! · {{current_date}}</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <!-- 引入手写字体和正文阅读字体 -->
-    <link
-        href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&family=Long+Cang&family=Noto+Sans+SC:wght@400;500;700&family=Patrick+Hand&display=swap"
-        rel="stylesheet">
+    <!-- 手写字体（ZCOOL KuaiLe / Patrick Hand）由渲染器以 @font-face base64 内嵌，正文回退系统中文字体，
+         不再依赖 Google Fonts 外网，离线/Linux 服务器同样可用 -->
 
     <style>
         :root {
@@ -38,12 +34,12 @@
             --title-border: #ffb74d;
             --title-text: #bf360c;
 
-            --font-title: 'ZCOOL KuaiLe', cursive;
-            /* 标题字体 */
-            --font-hand: 'Patrick Hand', "KaiTi", "STKaiti", serif;
-            /* 手写体 */
-            --font-body: 'Noto Sans SC', sans-serif;
-            /* 正文体 */
+            --font-title: 'ZCOOL KuaiLe', 'Microsoft YaHei', 'PingFang SC', 'WenQuanYi Zen Hei', 'Noto Sans SC', sans-serif;
+            /* 标题字体（内嵌手写体 + 系统中文回退） */
+            --font-hand: 'Patrick Hand', 'KaiTi', 'STKaiti', 'Microsoft YaHei', 'PingFang SC', 'WenQuanYi Zen Hei', cursive;
+            /* 手写体（内嵌 + 系统回退） */
+            --font-body: 'Microsoft YaHei', 'PingFang SC', 'WenQuanYi Zen Hei', 'Noto Sans SC', sans-serif;
+            /* 正文体（系统中文优先） */
         }
 
         * {

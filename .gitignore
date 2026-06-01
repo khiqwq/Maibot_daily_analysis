@@ -26,6 +26,7 @@ Thumbs.db
 # 用户配置文件（不提交到仓库）
 config.toml
 config.toml.backup.*
+config_back/
 
 # 生成的图片文件
 data_GeneratePicture/

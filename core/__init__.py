@@ -1,23 +1,11 @@
-"""
-核心模块
-"""
+"""核心模块：聊天分析与图片渲染"""
 
-from .analysis_utils import ChatAnalysisUtils
-from .summary_image_generator import SummaryImageGenerator
-from .constants import (
-    FontConfig,
-    ColorScheme,
-    LayoutConfig,
-    DecorationConfig,
-    AnalysisConfig
-)
+from .analysis import AnalysisService
+from .rendering import SummaryRenderer
+from .constants import AnalysisConfig
 
 __all__ = [
-    'ChatAnalysisUtils',
-    'SummaryImageGenerator',
-    'FontConfig',
-    'ColorScheme',
-    'LayoutConfig',
-    'DecorationConfig',
-    'AnalysisConfig',
+    "AnalysisService",
+    "SummaryRenderer",
+    "AnalysisConfig",
 ]

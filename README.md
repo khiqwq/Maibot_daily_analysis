@@ -1,6 +1,9 @@
 # MaiBot 每日分析插件 📊
 
-一款为 MaiBot 设计的智能聊天记录分析插件，能够生成精美的群聊总结和个人总结图片，帮你快速回顾群里发生了什么。
+一款为 **MaiBot 1.0** 设计的智能聊天记录分析插件，能够生成精美的群聊总结和个人总结图片，帮你快速回顾群里发生了什么。
+
+> 已适配 MaiBot 1.0 / maibot_sdk 2.x。图片渲染使用 **宿主内置的渲染能力**（`render.html2png`），
+> 无需自行安装 Playwright / Chromium，开箱即用。
 
 ## ✨ 功能特点
 
@@ -15,59 +18,46 @@
 ### 图片包含的模块
 
 **群聊总结模块：**
-- **24H 活跃轨迹** - 24小时发言分布柱状图，看看大家什么时候最活跃
+- **24H 活跃轨迹** - 24 小时发言分布柱状图
 - **今日话题** - AI 提取的群聊热门话题，带参与者统计
-- **群友画像** - 为活跃群友生成个性化称号 + MBTI 类型，带QQ头像
+- **群友画像** - 为活跃群友生成个性化称号 + MBTI 类型，带 QQ 头像
 - **语出惊人** - 今日群聊金句摘录，AI 给出推荐理由
 - **炫压抑评级** - 根据发言风格分析群友的"压抑指数"（娱乐向）
 
 **个人总结模块：**
-- **3H 活跃轨迹** - 显示用户最活跃时段前后3小时的发言分布
+- **3H 活跃轨迹** - 显示用户最活跃时段前后 3 小时的发言分布
 - **群友画像** - 个人专属称号和 MBTI 分析
 - **炫压抑评级** - 个人压抑指数评估
 - **语出惊人** - 个人金句摘录
 
 ## 🚀 快速开始
 
-### 1️⃣ 安装依赖
+### 1️⃣ 安装
 
-插件需要 Playwright 和 Chromium 浏览器来渲染图片。运行一键安装脚本：
+把整个插件目录放到 MaiBot 的 `plugins/` 下即可。本插件依赖：
 
-```bash
-# 进入插件目录
-cd modules/MaiBot/plugins/Maibot_daily_analysis
+- **宿主内置 HTML 渲染能力**（MaiBot 1.0 自带，会按需自动准备无头浏览器，无需手动安装）
+- **jinja2**（已在 `_manifest.json` 的 `dependencies` 中声明为 Python 包依赖，宿主会自动安装）
+- 手写字体已随插件打包在 `fonts/` 目录，渲染时以 base64 内嵌，**无需联网下载字体**
 
-# 运行安装脚本（自动安装 jinja2 + playwright + Chromium）
-python install_dependencies.py
-```
-
-> 💡 Chromium 浏览器约 170MB，首次安装需要一点时间
-
-**或者手动安装：**
-
-```bash
-pip install -r requirements.txt
-python -m playwright install chromium
-```
+> 💡 无需运行任何安装脚本，也无需手动 `pip install playwright` 或下载 Chromium。
 
 ### 2️⃣ 启用插件
 
-编辑 `config.toml` 文件：
+编辑 `config.toml`，或在 WebUI 中开启：
 
 ```toml
 [plugin]
-enabled = true  # 改为 true
+enabled = true   # 改为 true
 ```
 
-### 3️⃣ 重启 MaiBot
+### 3️⃣ 重启 / 重载
 
-重启后插件即可使用！
+重启或在 WebUI 重载插件后即可使用。
 
 ## 📖 使用方法
 
 ### 群聊总结命令
-
-在群里发送以下命令：
 
 ```
 /summary              # 查看今天的群聊总结
@@ -79,269 +69,203 @@ enabled = true  # 改为 true
 ```
 /mysummary            # 查看自己今天的个人总结
 /mysummary 昨天        # 查看自己昨天的个人总结
-/mysummary @某人       # 查看他人的个人总结（需要权限）
+/mysummary @某人       # 查看他人今天的个人总结（需要权限）
 /mysummary @某人 昨天   # 查看他人昨天的个人总结
+/mysummary QQ号        # 通过 QQ 号查看他人总结（需要权限）
 ```
 
-> 📝 查看他人总结需要在 `allowed_users` 列表中，详见权限配置
+> 📝 查看他人总结需要在 `user_summary.allowed_users` 列表中，详见权限配置。
+> @某人 既支持真实 @（从消息中解析对方 QQ），也支持直接写 QQ 号。
 
-### 图片模块顺序
-
-默认显示所有模块，顺序为：24H → 话题 → 画像 → 金句 → 评级
-
-如果想自定义显示内容，编辑 `config.toml`：
-
-```toml
-[summary]
-# 只显示 24H 活跃轨迹和今日话题
-display_order = ["24H", "Topics"]
-
-# 或者调整顺序：把金句放最前面
-display_order = ["Quotes", "24H", "Topics", "Portraits", "Rankings"]
-
-# 可选模块：
-# - 24H = 24H活跃轨迹
-# - Topics = 今日话题
-# - Portraits = 群友画像
-# - Quotes = 语出惊人（金句）
-# - Rankings = 炫压抑评级
-
-[user_summary]
-# 个人总结模块顺序（支持并排显示，用逗号分隔）
-display_order = ["3H", "Portraits,Rankings"]
-
-# 可选模块：
-# - 3H = 3H活跃轨迹
-# - Portraits = 群友画像
-# - Rankings = 炫压抑评级
-# - Quotes = 语出惊人
-```
-
-### 定时自动总结
-
-想让机器人每天固定时间自动发总结？编辑 `config.toml`：
-
-```toml
-[auto_summary]
-enabled = true                    # 开启自动总结
-time = "23:00"                    # 每晚 11 点发送
-timezone = "Asia/Shanghai"        # 时区设置
-min_messages = 10                 # 至少 10 条消息才生成总结
-
-# 指定生成总结的群（留空 = 所有活跃群）
-target_chats = [123456789, 987654321]
-```
-
-### 命令权限控制
-
-#### /summary 命令权限
-
-```toml
-[command_permission]
-# 黑名单模式：这些群不能用命令
-use_blacklist = true
-target_chats = [111111111]
-
-# 白名单模式：只有这些群能用命令
-# use_blacklist = false
-# target_chats = [222222222, 333333333]
-
-# /summary 管理员权限控制
-admin_users = []  # 为空时所有人可用；有值时只有列表中的QQ号可以使用 /summary 命令
-# admin_users = [123456789, 987654321]  # 只有这两个QQ号可以使用 /summary 命令
-```
-
-#### /mysummary 命令权限
-
-```toml
-[user_summary]
-enabled = true                    # 是否启用个人总结功能（关闭后所有人都无法使用）
-
-# 允许查看他人总结的用户列表
-allowed_users = []                # 为空时：所有人可以看自己和别人
-# allowed_users = [123456789]     # 有值时：所有人可以看自己，但只有列表中的用户可以查看他人总结
-```
-
-> 📝 权限控制说明：
-> - `/summary` 的权限由 `command_permission.admin_users` 控制
-> - `/mysummary` 的权限由 `user_summary.enabled` 和 `user_summary.allowed_users` 控制
-> - 两个命令的权限**相互独立**
-
-## ⚙️ 完整配置说明
-
-### config.toml 配置文件
+## ⚙️ 配置说明（config.toml）
 
 ```toml
 # ========== 插件基本配置 ==========
 [plugin]
-config_version = "1.0.0"
-enabled = true                    # 是否启用插件
+enabled = false              # 是否启用插件
+config_version = "2.1.0"     # 配置版本，请勿手动修改
 
 # ========== 群聊总结配置 ==========
 [summary]
-# 图片模块显示顺序
-display_order = ["24H", "Topics", "Portraits", "Quotes", "Rankings"]
+# 5 个下拉槽位，按 slot_1..slot_5 顺序显示。每个可选：
+# 无 / 24H活跃轨迹 / 今日话题 / 群友画像 / 语出惊人 / 炫压抑评级
+slot_1 = "24H活跃轨迹"
+slot_2 = "今日话题"
+slot_3 = "群友画像"
+slot_4 = "语出惊人"
+slot_5 = "炫压抑评级"
+max_depression_display = 6   # 炫压抑评级最多展示人数
+depression_show_bottom = true # 是否展示倒数排名（开启：前N/2+后N/2；关闭：只前N）
 
 # ========== 个人总结配置 ==========
 [user_summary]
-enabled = true                    # 是否启用个人总结功能
-allowed_users = []                # 允许查看他人总结的用户列表（为空=所有人可以看别人）
-display_order = ["3H", "Portraits,Rankings"]  # 模块显示顺序
+enabled = true               # 是否启用个人总结功能
+allowed_users = []           # 允许查看他人总结的 QQ 号（为空=所有人可看他人）
+# 4 个下拉槽位。每个可选：无 / 3H活跃轨迹 / 群友画像 / 炫压抑评级 / 语出惊人 / 群友画像+炫压抑评级(并排)
+slot_1 = "3H活跃轨迹"
+slot_2 = "群友画像+炫压抑评级(并排)"
+slot_3 = "语出惊人"
+slot_4 = "无"
 
 # ========== 自动总结配置 ==========
 [auto_summary]
-enabled = false                   # 是否启用每日自动总结
-time = "23:00"                    # 每日自动总结的时间（24小时制）
-timezone = "Asia/Shanghai"        # 时区设置
-min_messages = 10                 # 生成总结所需的最少消息数量
-target_chats = []                 # 目标群聊列表（留空 = 所有活跃群）
+enabled = false              # 是否启用每日自动总结
+time = "23:00"               # 每日执行时间（HH:MM，24 小时制）
+timezone = "Asia/Shanghai"   # 时区（IANA 名称，使用标准库 zoneinfo）
+min_messages = 10            # 生成总结所需的最少消息数量
+target_chats = []            # 目标群号（为空=所有活跃群）
 
 # ========== 命令权限控制 ==========
 [command_permission]
-use_blacklist = true              # true=黑名单模式, false=白名单模式
-target_chats = []                 # 黑/白名单群聊列表
-admin_users = []                  # /summary 管理员QQ号列表（为空=所有人可用）
+mode = "黑名单"              # "黑名单"=列表中的群禁用命令；"白名单"=只有列表中的群可用
+target_chats = []            # 黑/白名单群号列表
+admin_users = []             # /summary 管理员 QQ 号（为空=所有人可用）
 ```
 
-## 🎨 图片样式说明
+> 📌 QQ 号、群号统一用 **字符串数组** 填写，例如 `["123456", "987654"]`。
 
-插件使用 **手写便签风格（Scrapbook）** 生成图片：
+### 权限说明
 
-- 🎨 手写字体 + 纸张纹理
-- 📎 胶带贴纸装饰
-- 🌈 彩色便签和卡片
-- 📊 可视化图表
-- 🖼️ QQ 头像展示
+- **群聊黑/白名单**（`command_permission.mode` + `target_chats`）：
+  - `黑名单`：列表中的群 **禁用** `/summary`、`/mysummary`；其余群可用。
+  - `白名单`：列表为空时全部禁用；否则 **只有** 列表中的群可用。
+- **`/summary` 管理员**（`command_permission.admin_users`）：为空时所有人可用；有值时仅列表内用户可用。
+- **`/mysummary` 权限**（`user_summary.enabled` + `user_summary.allowed_users`）：
+  - 关闭 `enabled` 后所有人都不能用。
+  - `allowed_users` 为空：所有人可看自己和他人；有值：所有人可看自己，仅列表内用户可看他人。
+- `/summary` 与 `/mysummary` 的权限相互独立。
 
-图片会自动保存到 `data_GeneratePicture/` 目录，发送后自动删除旧图片。
+### 模块显示顺序（WebUI 下拉选择）
+
+模块顺序用**固定的下拉槽位**控制，每个槽位在 WebUI 里是一个中文下拉框（和"权限模式"一样点开选）：
+
+- **群聊**：`slot_1` ~ `slot_5` 共 5 个槽位，从上到下就是显示顺序。
+  每个槽位可选：`无` / `24H活跃轨迹` / `今日话题` / `群友画像` / `语出惊人` / `炫压抑评级`。
+- **个人**：`slot_1` ~ `slot_4` 共 4 个槽位。
+  每个槽位可选：`无` / `3H活跃轨迹` / `群友画像` / `炫压抑评级` / `语出惊人` / `群友画像+炫压抑评级(并排)`。
+
+规则：
+- **想改顺序**：改各槽位选的模块即可。
+- **想隐藏某模块**：把对应槽位选成 `无`（或不在任何槽位里选它）。
+- 同一个模块在多个槽位重复选只显示一次。
+- 个人的 `群友画像+炫压抑评级(并排)` 表示这两个模块横向并排显示。
+
+示例（群聊只显示 24H 和话题）：
+
+```toml
+[summary]
+slot_1 = "24H活跃轨迹"
+slot_2 = "今日话题"
+slot_3 = "无"
+slot_4 = "无"
+slot_5 = "无"
+```
+
+## 🎨 图片样式与字体
+
+插件使用 **手写便签风格（Scrapbook）** 生成图片：纸张纹理、胶带贴纸、彩色便签、可视化图表、QQ 头像展示。
+
+- **手写字体**（`ZCOOL KuaiLe` 标题体、`Patrick Hand` 英文手写体）已随插件打包在 `fonts/` 目录，
+  渲染时以 `@font-face` base64 内嵌，**离线可用，不依赖 Google Fonts**。
+- **正文**回退到系统中文字体（Windows 微软雅黑 / macOS 苹方 / Linux 文泉驿正黑等）。
+- **QQ 头像**在渲染时在线拉取（`q1.qlogo.cn`），渲染开启 `allow_network`。
+- 渲染由宿主 `render.html2png` 完成，直接返回图片 base64，不在本地落盘临时文件。
+
+如需修改样式，编辑 `templates/scrapbook/image_template.html`（群聊）或
+`user_summary_template.html`（个人）的 CSS。
 
 ## ❓ 常见问题
 
-### 1. 安装依赖失败？
+### 1. 图片生成失败？
 
-**Chromium 下载慢：** 国内网络可能较慢，请耐心等待或使用代理
+- 检查 MaiBot 日志中本插件的报错（渲染失败时会在日志中记录原因，但不会向群里发文字）。
+- 确认宿主的浏览器渲染能力可用（首次使用宿主可能需要自动准备无头浏览器，请耐心等待或查看宿主日志）。
 
-**手动安装：**
-```bash
-python -m playwright install chromium
-```
+### 2. 图片里中文是方块 / 字体不好看？
 
-**Linux 系统缺少依赖：**
-```bash
-python -m playwright install chromium --with-deps
-```
+- 手写标题字体已内嵌，正常应能显示。
+- 正文使用系统字体：若运行在 Linux 服务器且系统缺少中文字体，请安装中文字体（如
+  `fonts-wqy-zenhei` / `fonts-noto-cjk`），否则正文会显示为方块。
 
-### 2. 图片生成失败？
+### 3. 群友画像没有头像？
 
-检查以下几点：
-- ✅ 是否成功安装了 Playwright 和 Chromium
-- ✅ 运行 `python install_dependencies.py` 看是否报错
-- ✅ 检查日志中的错误信息
+- 头像通过 QQ 官方服务器 `q1.qlogo.cn` 在线获取，需要渲染环境能访问该地址。
+- 匿名用户或无 QQ 号的用户不会显示头像。
 
-### 3. 自动总结不执行？
+### 4. 自动总结不执行？
 
-检查配置：
-- ✅ `plugin.enabled = true`
-- ✅ `auto_summary.enabled = true`
-- ✅ 时间格式正确（`23:00` 而不是 `23:0`）
-- ✅ 群里消息数量是否达到 `min_messages`
+- 确认 `plugin.enabled = true` 且 `auto_summary.enabled = true`。
+- 确认时间格式正确（`23:00`）。
+- 确认群里消息数量达到 `min_messages`。
+- 修改自动总结相关配置后，插件会在配置热更新时自动重启调度器。
 
-### 4. 群友画像没有头像？
+### 5. /mysummary @某人 没反应？
 
-头像通过 QQ 官方服务器获取，需要：
-- ✅ 网络能访问 `q1.qlogo.cn`
-- ✅ 用户有 QQ 号（不是匿名用户）
-
-### 5. 某个模块不显示？
-
-检查 `display_order` 配置：
-```toml
-# 如果想显示群友画像，确保列表中有 "Portraits"
-display_order = ["24H", "Topics", "Portraits"]
-```
-
-### 6. /mysummary @某人 没反应？
-
-检查权限配置：
-- ✅ `user_summary.enabled = true`
-- ✅ 如果 `allowed_users` 有值，确保你的 QQ 号在列表中
-
-## 🔧 高级定制
-
-### 修改图片样式
-
-编辑 `templates/scrapbook/image_template.html` 的 CSS 部分：
-
-```css
-:root {
-    --bg-paper: #fdfbf7;        /* 纸张背景色 */
-    --ink-primary: #5d4037;     /* 主文字颜色 */
-    --color-yellow: #fff9c4;    /* 黄色便签 */
-    --color-pink: #ffccbc;      /* 粉色元素 */
-    --color-blue: #b3e5fc;      /* 蓝色元素 */
-    --color-green: #c8e6c9;     /* 绿色元素 */
-}
-```
-
-### 调整分析参数
-
-编辑 `core/constants.py` 中的 `AnalysisConfig` 类：
-
-```python
-class AnalysisConfig:
-    MIN_MESSAGES_FOR_TITLE = 5      # 生成称号的最小发言数
-    MAX_USERS_FOR_TITLE = 6         # 最多显示几个群友画像
-    MIN_MESSAGES_FOR_GOLDEN = 3     # 金句最小长度
-    MAX_GOLDEN_QUOTES = 4           # 最多显示几条金句
-```
+- 确认 `user_summary.enabled = true`。
+- 若 `allowed_users` 有值，确认你的 QQ 号在列表中。
 
 ## 📋 技术架构
 
 ```
-用户命令 → plugin.py (命令处理)
-         ↓
-    database_api (查询聊天记录)
-         ↓
-    analysis_utils.py (AI 分析各种数据)
-         ↓
-    summary_image_generator.py (准备模板数据)
-         ↓
-    Jinja2 渲染 HTML → Playwright 渲染 → 生成图片
+用户命令 (/summary, /mysummary) → plugin.py（命令处理 + 权限）
+            ↓
+    ctx.message.get_by_time_in_chat（查询并归一化历史消息）
+            ↓
+    core/analysis.py（ctx.llm 分析：总结/话题/称号/金句/炫压抑/个人画像）
+            ↓
+    core/rendering.py（Jinja2 渲染 HTML + 内嵌字体）
+            ↓
+    ctx.render.html2png（宿主渲染为 PNG，返回 base64）
+            ↓
+    ctx.send.image（发送图片到聊天流）
 ```
 
-**核心依赖：**
-- `jinja2` - 模板渲染引擎
-- `playwright` - 浏览器自动化工具
-- `chromium` - 无头浏览器
+**用到的宿主能力（capabilities）：**
+`send.text`、`send.image`、`llm.generate`、`config.get`、
+`message.get_by_time_in_chat`、`chat.get_group_streams`、`render.html2png`
+
+**目录结构：**
+
+```text
+Maibot_daily_analysis-main/
+  _manifest.json          # manifest_version 2，id=khiqwq.daily_analysis
+  plugin.py               # 插件主类、命令、定时调度器
+  config.toml             # 配置
+  core/
+    analysis.py           # AnalysisService：聊天分析（LLM）
+    rendering.py          # SummaryRenderer：图片渲染
+    constants.py          # AnalysisConfig：分析参数
+  templates/scrapbook/    # Jinja2 HTML 模板
+  fonts/                  # 打包的手写字体（woff2）
+```
+
+### 调整分析参数
+
+编辑 `core/constants.py` 中的 `AnalysisConfig`：
+
+```python
+class AnalysisConfig:
+    MIN_MESSAGES_FOR_TITLE = 5   # 参与称号/画像分析的最小发言数
+    MAX_USERS_FOR_TITLE = 8      # 群友画像最多分析用户数
+    MIN_QUOTE_LENGTH = 5         # 金句最小长度
+    MAX_QUOTE_LENGTH = 100       # 金句最大长度
+    MAX_DEPRESSION_DISPLAY = 6   # 炫压抑评级默认展示人数
+```
 
 ## 📜 更新日志
 
-### v1.2.1 (2025-12-20)
-- 炫压抑评级新增隐藏分数排序（0-150分），同等级内可精确排名
-- 新增配置项 `max_depression_display`：炫压抑评级最多展示人数（默认6）
-- 新增配置项 `depression_show_bottom`：是否展示倒数排名（默认开启）
-- 展示逻辑优化：正数优先（6→前3+后3，7→前4+后3，8→前4+后4）
+### v2.0.0
+- **适配 MaiBot 1.0 / maibot_sdk 2.x**（完整重写为新插件系统）
+- 改用宿主内置 `render.html2png` 渲染，移除自带 Playwright/Chromium 与依赖安装脚本
+- 手写字体改为随插件打包并 base64 内嵌，移除对 Google Fonts 的依赖，优化 Linux/离线渲染
+- 图片渲染直接返回 base64，不再落盘临时文件
+- 各项 LLM 分析并发执行，缩短整体耗时
+- 群聊"表情统计"改用真实 emoji 计数
+- 权限配置由 `use_blacklist` 改为更直观的 `mode = "黑名单"/"白名单"`
+- 命令权限模式说明详见配置说明
 
-### v1.2.0 (2025-12-13)
-- 新增 `/mysummary` 命令用于生成个人总结
-- 新增个人总结独立权限配置（`enabled` 开关、`allowed_users` 列表）
-- 分离 `/summary` 和 `/mysummary` 的权限管理
-- 修复昨天总结日期显示错误的问题
-- 重构图片渲染为 HTML+Playwright 方案
-- 新增 Scrapbook 风格模板
-- 新增 3H 活跃轨迹模块（个人总结）
-- 支持 WebUI 可视化配置
-- 优化 @ 用户解析（支持 CQ 码格式）
-
-### v1.1.0 (2025-11-15)
-- 新增用户画像分析功能
-- 新增 AI 生成个性标签
-- 新增活跃时段分析
-- 新增今日名言提取
-- 新增心情指数评估
-
-### v1.0.0 (2025-11-15)
-- 初始版本发布
+### v1.2.x 及更早
+- 见旧版历史：个人总结、群友画像/MBTI、金句、炫压抑评级、24H 活跃轨迹、定时自动总结等功能。
 
 ## 📜 许可证
 
@@ -353,17 +277,6 @@ GPL-3.0-or-later
 
 ## 🙏 致谢
 
-- 原插件作者：久远 ([saberlights](https://github.com/saberlights)) - [原项目地址](https://github.com/saberlights/chat_summary_plugin)
-- 图片风格设计灵感来自 [astrbot](https://github.com/Soulter/astrbot) 项目的 scrapbook 风格总结
-- 感谢 [MaiBot](https://github.com/MaiM-with-u/MaiBot) 项目提供的插件框架
-- AI 辅助开发：[Claude](https://claude.ai) by Anthropic
-- 感谢所有贡献者和用户的反馈
-
----
-
-## 💬 需要帮助？
-
-- 📝 提交 Issue：[GitHub Issues](https://github.com/khiqwq/Maibot_daily_analysis/issues)
-- 📖 查看文档：[MaiBot 官方文档](https://docs.mai-mai.org/)
-
-祝你使用愉快！✨
+- 原插件作者：久远 ([saberlights](https://github.com/saberlights))
+- 图片风格灵感来自 astrbot 的 scrapbook 风格总结
+- 感谢 MaiBot 项目提供的插件框架
