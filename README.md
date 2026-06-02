@@ -83,7 +83,7 @@ enabled = true   # 改为 true
 # ========== 插件基本配置 ==========
 [plugin]
 enabled = false              # 是否启用插件
-config_version = "2.1.0"     # 配置版本，请勿手动修改
+config_version = "2.3.0"     # 配置版本，请勿手动修改
 
 # ========== 群聊总结配置 ==========
 [summary]
@@ -96,11 +96,15 @@ slot_4 = "语出惊人"
 slot_5 = "炫压抑评级"
 max_depression_display = 6   # 炫压抑评级最多展示人数
 depression_show_bottom = true # 是否展示倒数排名（开启：前N/2+后N/2；关闭：只前N）
+# 图片顶部 Highlight Time 显示：消息时间跨度（最早→最晚）/ 最活跃时段（发言最多的一小时）
+highlight_time_mode = "消息时间跨度"
 
 # ========== 个人总结配置 ==========
 [user_summary]
 enabled = true               # 是否启用个人总结功能
-allowed_users = []           # 允许查看他人总结的 QQ 号（为空=所有人可看他人）
+# 查看他人名单模式：白名单=仅名单内可看他人；黑名单=名单内禁止看他人，其余人可看
+view_others_mode = "白名单"
+allowed_users = []           # 配合上面模式控制谁能看他人（为空=所有人可看他人）；所有人始终可看自己
 # 4 个下拉槽位。每个可选：无 / 3H活跃轨迹 / 群友画像 / 炫压抑评级 / 语出惊人 / 群友画像+炫压抑评级(并排)
 slot_1 = "3H活跃轨迹"
 slot_2 = "群友画像+炫压抑评级(并排)"
@@ -120,6 +124,16 @@ target_chats = []            # 目标群号（为空=所有活跃群）
 mode = "黑名单"              # "黑名单"=列表中的群禁用命令；"白名单"=只有列表中的群可用
 target_chats = []            # 黑/白名单群号列表
 admin_users = []             # /summary 管理员 QQ 号（为空=所有人可用）
+
+# ========== 高级 ==========
+[advanced]
+# 分析使用的【模型任务名】(task)，不是模型名。如 utils / planner / replyer。
+# 该任务内的模型按其 model_list 随机/轮询；填错会自动回退 utils。
+# 想固定用某个具体模型：在 MaiBot 的 model_config.toml 把对应任务的 model_list 设成那一个。
+model_task = "utils"
+inject_memory = false        # 实验性：把总结注入麦麦记忆（群聊→该群；个人→对该用户的记忆）
+llm_timeout_seconds = 60     # 单次 LLM 调用超时（秒），需 MaiBot 1.0.0-rc.4+ 生效
+render_timeout_seconds = 25  # 单次图片渲染超时（秒）
 ```
 
 > 📌 QQ 号、群号统一用 **字符串数组** 填写，例如 `["123456", "987654"]`。
@@ -130,9 +144,12 @@ admin_users = []             # /summary 管理员 QQ 号（为空=所有人可�
   - `黑名单`：列表中的群 **禁用** `/summary`、`/mysummary`；其余群可用。
   - `白名单`：列表为空时全部禁用；否则 **只有** 列表中的群可用。
 - **`/summary` 管理员**（`command_permission.admin_users`）：为空时所有人可用；有值时仅列表内用户可用。
-- **`/mysummary` 权限**（`user_summary.enabled` + `user_summary.allowed_users`）：
+- **`/mysummary` 权限**（`user_summary.enabled` + `view_others_mode` + `allowed_users`）：
   - 关闭 `enabled` 后所有人都不能用。
-  - `allowed_users` 为空：所有人可看自己和他人；有值：所有人可看自己，仅列表内用户可看他人。
+  - **所有人始终可以查看自己**；查看他人受名单模式控制：
+    - `allowed_users` 为空：所有人都能看他人。
+    - `白名单`：仅名单内用户可看他人。
+    - `黑名单`：名单内用户禁止看他人，其余人可看。
 - `/summary` 与 `/mysummary` 的权限相互独立。
 
 ### 模块显示顺序（WebUI 下拉选择）
@@ -253,6 +270,16 @@ class AnalysisConfig:
 ```
 
 ## 📜 更新日志
+
+### v2.3.0
+- **WebUI 配置分页**：每个配置节渲染为独立标签页（插件/群聊总结/个人总结/自动总结/命令权限/高级）
+- 模块顺序改为**中文下拉槽位**（slot_1.. + "无"隐藏）；个人支持"群友画像+炫压抑评级(并排)"
+- 新增 **Highlight Time 显示**方式（消息时间跨度 / 最活跃时段）
+- 个人总结新增**查看他人黑/白名单模式**（`view_others_mode`）
+- 新增实验性 **总结注入麦麦记忆**（`maisaka.context.append`）
+- 新增**高级**配置：模型任务（自由填任务名 + 加载校验回退）、LLM 调用超时、图片渲染超时（可在 WebUI 配置）
+- 适配 **MaiBot 1.0.0-rc.4**：通过 `rpc_timeout_ms` 覆盖单次能力调用超时（防御式，旧版自动回退）；`plugin_type` 设为 `tool`
+- 性能/健壮性：LLM 调用并发上限（信号量）、定时任务单群超时兜底、群聊总字数改用真实统计、群友画像头像匹配更稳健、QQ 头像渲染前预下载为 base64 离线渲染
 
 ### v2.0.0
 - **适配 MaiBot 1.0 / maibot_sdk 2.x**（完整重写为新插件系统）

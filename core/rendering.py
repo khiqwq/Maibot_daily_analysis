@@ -251,9 +251,11 @@ async def prefetch_avatars(qqs: List[str], logger: Any = None) -> Dict[str, str]
 class SummaryRenderer:
     """聊天总结图片渲染器（绑定插件 ctx）"""
 
-    def __init__(self, ctx: Any):
+    def __init__(self, ctx: Any, timeout_ms: int = _RENDER_TIMEOUT_MS):
         self.ctx = ctx
         self.logger = ctx.logger
+        # 单次渲染超时（毫秒），可由插件配置覆盖
+        self.timeout_ms = int(timeout_ms) if timeout_ms else _RENDER_TIMEOUT_MS
         self.env = Environment(
             loader=FileSystemLoader(_TEMPLATE_DIR),
             autoescape=select_autoescape(["html", "xml"]),
@@ -280,17 +282,26 @@ class SummaryRenderer:
     async def _render_png_base64(self, html_content: str) -> Optional[str]:
         """通过宿主能力把 HTML 渲染为 PNG，返回纯 base64（失败返回 None）。"""
         html_content = self._inject_fonts(html_content)
+        # render.html2png 的 timeout_ms 是渲染业务超时；其 RPC 超时另算。
+        # MaiBot rc.4+ 可用 rpc_timeout_ms 把 RPC 超时设得比渲染超时更长，
+        # 避免渲染超时 > 默认 30s RPC 时被 RPC 提前掐断。旧版 SDK 不接受则退回。
+        common = dict(
+            html=html_content,
+            selector="body",
+            viewport={"width": _VIEWPORT_WIDTH, "height": _VIEWPORT_HEIGHT},
+            device_scale_factor=_DEVICE_SCALE,
+            full_page=True,
+            wait_until="load",
+            allow_network=False,
+            timeout_ms=self.timeout_ms,
+        )
         try:
-            result = await self.ctx.render.html2png(
-                html=html_content,
-                selector="body",
-                viewport={"width": _VIEWPORT_WIDTH, "height": _VIEWPORT_HEIGHT},
-                device_scale_factor=_DEVICE_SCALE,
-                full_page=True,
-                wait_until="load",
-                allow_network=False,
-                timeout_ms=_RENDER_TIMEOUT_MS,
-            )
+            try:
+                result = await self.ctx.render.html2png(
+                    rpc_timeout_ms=self.timeout_ms + 5000, **common
+                )
+            except TypeError:
+                result = await self.ctx.render.html2png(**common)
         except Exception as e:
             self.logger.error(f"调用渲染能力异常: {e}", exc_info=True)
             return None

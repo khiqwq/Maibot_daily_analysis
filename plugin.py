@@ -84,7 +84,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="2.2.0",
+        default="2.3.0",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -238,11 +238,15 @@ class AdvancedSection(PluginConfigBase):
     __ui_label__ = "高级"
     __ui_icon__ = "settings"
     __ui_order__ = 5
-    model_task: Literal["utils", "planner", "replyer"] = Field(
+    model_task: str = Field(
         default="utils",
-        description="生成总结/分析使用的模型任务。注意：宿主对插件的单次模型调用有约 30 秒硬超时，"
-        "建议用 utils 或 planner（通常是快速非思考模型）；replyer 是主回复模型，若它被配置为思考型模型会很慢、极易超时",
-        json_schema_extra={"label": "模型任务"},
+        description="生成总结/分析使用的【模型任务名】。该任务内配置的模型会按其 model_list 随机/轮询使用。"
+        "建议 utils 或 planner（通常是快速非思考模型）；replyer 是主回复模型，可能较慢、需配合调大 LLM 超时。",
+        json_schema_extra={
+            "label": "模型任务",
+            "hint": "填 MaiBot 的【任务名】(如 utils / planner / replyer / memory)，不是模型名；"
+            "想指定具体模型请在 MaiBot 的 model_config.toml 改该任务的 model_list。填错会自动回退 utils。",
+        },
     )
     inject_memory: bool = Field(
         default=False,
@@ -252,6 +256,17 @@ class AdvancedSection(PluginConfigBase):
             "label": "总结注入麦麦记忆（实验性）",
             "hint": "实验功能，默认关闭；开启后总结内容会进入麦麦记忆",
         },
+    )
+    llm_timeout_seconds: int = Field(
+        default=60,
+        description="单次 LLM 调用的超时时间（秒）。需要 MaiBot 1.0.0-rc.4 及以上才生效（更老版本固定约 30 秒）。"
+        "想让分析用更慢/更强的模型时可调大。",
+        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 60；rc.4 以下版本此项不生效"},
+    )
+    render_timeout_seconds: int = Field(
+        default=25,
+        description="单次图片渲染的超时时间（秒）。图片较复杂或机器较慢时可适当调大。",
+        json_schema_extra={"label": "图片渲染超时（秒）", "hint": "默认 25"},
     )
 
 
@@ -284,12 +299,44 @@ class DailyAnalysisPlugin(MaiBotPlugin):
     # ---------- 生命周期 ----------
 
     async def on_load(self) -> None:
-        self._service = AnalysisService(self.ctx, self.config.advanced.model_task)
-        self._renderer = SummaryRenderer(self.ctx)
+        adv = self.config.advanced
+        model_task = await self._validated_model_task()
+        self._service = AnalysisService(self.ctx, model_task, self._llm_timeout_ms())
+        self._renderer = SummaryRenderer(self.ctx, self._render_timeout_ms())
         self._start_scheduler()
         self.ctx.logger.info(
-            f"每日分析插件已加载（分析模型任务: {self.config.advanced.model_task}）"
+            f"每日分析插件已加载（模型任务: {model_task}，LLM超时: {adv.llm_timeout_seconds}s，"
+            f"渲染超时: {adv.render_timeout_seconds}s）"
         )
+
+    def _llm_timeout_ms(self) -> int:
+        return max(5, int(self.config.advanced.llm_timeout_seconds or 60)) * 1000
+
+    def _render_timeout_ms(self) -> int:
+        return max(5, int(self.config.advanced.render_timeout_seconds or 25)) * 1000
+
+    async def _validated_model_task(self) -> str:
+        """校验配置的模型任务名是否为宿主可用任务；非法（如误填模型名）则回退 utils 并告警。
+
+        ctx.llm.generate(model=...) 只接受【任务名】(resolve_task_name 对未知名抛 ValueError)，
+        因此这里在加载/热更新时主动校验，避免误填导致每次分析静默失败。
+        """
+        want = (self.config.advanced.model_task or "utils").strip() or "utils"
+        try:
+            res = await self.ctx.llm.get_available_models()
+            models = res.get("models") if isinstance(res, dict) else res
+            if isinstance(models, list) and models:
+                if want in models:
+                    return want
+                fallback = "utils" if "utils" in models else str(models[0])
+                self.ctx.logger.warning(
+                    f"配置的模型任务 '{want}' 不在可用任务列表 {models} 中"
+                    f"（只能填任务名、不能填模型名），已回退到 '{fallback}'"
+                )
+                return fallback
+        except Exception as e:
+            self.ctx.logger.warning(f"校验模型任务可用性失败，按配置值 '{want}' 使用: {e}")
+        return want
 
     async def on_unload(self) -> None:
         await self._stop_scheduler()
@@ -298,9 +345,12 @@ class DailyAnalysisPlugin(MaiBotPlugin):
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
         if scope != "self":
             return
-        # 同步分析模型任务
+        # 同步分析模型任务与超时设置
         if self._service is not None:
-            self._service.model = self.config.advanced.model_task
+            self._service.model = await self._validated_model_task()
+            self._service.rpc_timeout_ms = self._llm_timeout_ms()
+        if self._renderer is not None:
+            self._renderer.timeout_ms = self._render_timeout_ms()
         # 自动总结配置可能变化，重启调度器
         await self._stop_scheduler()
         self._start_scheduler()
