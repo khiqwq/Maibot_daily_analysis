@@ -23,20 +23,21 @@ from .constants import AnalysisConfig
 
 
 # LLM 各任务的输出 token 上限。
-# 注意：SDK→宿主的能力调用 RPC 固定 30 秒超时，单次 LLM 必须在 30 秒内返回，
-# 因此默认使用快速模型(utils/flash)并适度限制输出长度，避免超时。
+# maibot-sdk 2.x 新版支持 timeout_ms 透传，可自定义 RPC 超时（默认 30 秒）。
+# 命令使用后台任务模式执行，不受 60 秒命令超时限制，可设置宽松的超时。
+_LLM_TIMEOUT_MS = 120000  # 120 秒，后台任务无时间压力
 _SUMMARY_MAX_TOKENS = 1200
 _JSON_MAX_TOKENS = 2500
-# 多用户 JSON（群友称号/炫压抑评级）输出较长，但要兼顾 30 秒 RPC 超时，控制在 2500
+# 多用户 JSON（群友称号/炫压抑评级）输出较长，恢复到 2500
 _MULTI_USER_JSON_MAX_TOKENS = 2500
 
 # LLM 输入消息上限：取最近 N 条参与总结/话题/金句，避免超大群 prompt 过长拖慢生成
-_MAX_INPUT_MESSAGES = 400
+_MAX_INPUT_MESSAGES = 300
 
-# 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽 30 秒超时预算"。
+# 并发 LLM 调用上限。设为 2：兼顾速度与上游模型池并发能力。
 _LLM_MAX_CONCURRENCY = 2
 
-# 默认模型任务：utils 对应快速非思考模型，适合在 30 秒 RPC 超时内完成
+# 默认模型任务：utils 对应快速非思考模型
 _DEFAULT_MODEL_TASK = "utils"
 
 
@@ -67,10 +68,8 @@ class AnalysisService:
         self.logger = ctx.logger
         # 模型任务名（可由插件配置覆盖）。默认 utils=快速模型，确保 30 秒内返回
         self.model = model or _DEFAULT_MODEL_TASK
-        # 限制并发 LLM 调用数：每个能力调用有约 30 秒 RPC 硬超时，若上游串行处理，
-        # 一次放出过多调用会让排队靠后的调用把等待时间算进自己的超时预算而被掐断。
-        # 信号量在"真正发起 ctx.llm.generate 之前"获取，确保每次调用的 30 秒计时
-        # 从有空闲槽位时才开始，避免排队耗尽预算。
+        # 限制并发 LLM 调用数。设为 2：兼顾速度与上游模型池并发能力。
+        # timeout_ms 透传已解决 30 秒硬限制，信号量仅做流控而非超时规避。
         self._llm_semaphore = asyncio.Semaphore(_LLM_MAX_CONCURRENCY)
 
     # ==================== LLM 调用封装 ====================
@@ -82,30 +81,59 @@ class AnalysisService:
         request_type: str,
         max_tokens: int = _JSON_MAX_TOKENS,
         temperature: float = 0.7,
+        _retries: int = 2,
     ) -> Optional[str]:
-        """调用宿主 LLM 能力，成功返回文本，失败返回 None"""
-        try:
-            async with self._llm_semaphore:
-                result = await self.ctx.llm.generate(
-                    prompt,
-                    model=self.model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-        except Exception as e:
-            self.logger.error(f"LLM 调用异常 ({request_type}): {e}", exc_info=True)
-            return None
+        """调用宿主 LLM 能力，成功返回文本，失败返回 None。
 
-        if not isinstance(result, dict) or not result.get("success", False):
-            err = result.get("error") if isinstance(result, dict) else result
-            self.logger.error(f"LLM 生成失败 ({request_type}): {err}")
-            return None
+        利用 maibot-sdk 2.x 的 timeout_ms 透传能力，主动设置较长的 RPC 超时，
+        给 LLM 推理预留充足时间。内置重试机制：超时时自动重试一次（截断 prompt）。
+        """
+        attempt = 0
+        current_prompt = prompt
+        current_max_tokens = max_tokens
 
-        response = result.get("response")
-        if not response:
-            self.logger.error(f"LLM 返回空内容 ({request_type})")
-            return None
-        return str(response)
+        while attempt < _retries:
+            try:
+                async with self._llm_semaphore:
+                    # 通过 **kwargs 透传 timeout_ms 到 call_capability → call_host_method → _rpc_call
+                    result = await self.ctx.llm.generate(
+                        current_prompt,
+                        model=self.model,
+                        temperature=temperature,
+                        max_tokens=current_max_tokens,
+                        timeout_ms=_LLM_TIMEOUT_MS,
+                    )
+            except Exception as e:
+                err_str = str(e)
+                is_timeout = "E_TIMEOUT" in err_str or "超时" in err_str or "timed out" in err_str.lower()
+                attempt += 1
+                if is_timeout and attempt < _retries:
+                    # 超时重试：截断 prompt 至 60%，降低 max_tokens，等待 3 秒后重试
+                    truncated_len = int(len(current_prompt) * 0.6)
+                    current_prompt = current_prompt[:truncated_len]
+                    current_max_tokens = int(current_max_tokens * 0.75)
+                    self.logger.warning(
+                        f"LLM 超时 ({request_type})，第 {attempt} 次重试 "
+                        f"(prompt 截至 {len(current_prompt)} 字符, max_tokens={current_max_tokens})"
+                    )
+                    await asyncio.sleep(3)
+                    continue
+                self.logger.error(f"LLM 调用异常 ({request_type}): {e}", exc_info=True)
+                return None
+
+            # 成功拿到响应
+            if not isinstance(result, dict) or not result.get("success", False):
+                err = result.get("error") if isinstance(result, dict) else result
+                self.logger.error(f"LLM 生成失败 ({request_type}): {err}")
+                return None
+
+            response = result.get("response")
+            if not response:
+                self.logger.error(f"LLM 返回空内容 ({request_type})")
+                return None
+            return str(response)
+
+        return None
 
     # ==================== 纯数据处理（静态） ====================
 

@@ -289,7 +289,6 @@ class SummaryRenderer:
                 full_page=True,
                 wait_until="load",
                 allow_network=False,
-                timeout_ms=_RENDER_TIMEOUT_MS,
             )
         except Exception as e:
             self.logger.error(f"调用渲染能力异常: {e}", exc_info=True)

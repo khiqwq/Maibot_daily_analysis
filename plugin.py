@@ -456,6 +456,62 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         # 黑名单：列表内禁用，其余允许
         return gid not in target_chats
 
+    # ==================== 后台任务方法（不受 60 秒命令超时限制） ====================
+
+    async def _run_group_summary_in_background(
+        self, stream_id: str, group_id: str, messages: list,
+        message_count: int, time_range: str, target_date: datetime
+    ) -> None:
+        """后台执行群聊总结（不受 60 秒命令超时限制）"""
+        guard_key = f"g:{stream_id}"
+        try:
+            summary = await self._service.analyze_group_summary(messages, message_count)
+            if not summary:
+                self.ctx.logger.error("群聊总结文本生成失败")
+                return
+
+            image_base64 = await self._build_group_summary_image(
+                messages, summary, time_range, target_date
+            )
+            if not image_base64:
+                self.ctx.logger.error(f"群 {group_id} 的群聊总结图片渲染失败")
+                return
+
+            await self.ctx.send.image(image_base64, stream_id)
+            if self.config.advanced.inject_memory:
+                await self._inject_memory(
+                    stream_id, f"【{time_range}群聊总结】{summary}", "plugin:daily_analysis:group"
+                )
+        except Exception as e:
+            self.ctx.logger.error(f"后台群聊总结异常: {e}", exc_info=True)
+        finally:
+            self._generating.discard(guard_key)
+
+    async def _run_user_summary_in_background(
+        self, stream_id: str, user_messages: list, query_user_name: str,
+        query_user_id: str, target_date: datetime, time_range: str, is_self: bool
+    ) -> None:
+        """后台执行个人总结（不受 60 秒命令超时限制）"""
+        guard_key = f"u:{stream_id}:{query_user_id}"
+        try:
+            image_base64, user_summary_text = await self._build_user_summary_image(
+                user_messages, query_user_name, query_user_id, target_date
+            )
+            if not image_base64:
+                self.ctx.logger.error(f"用户 {query_user_id} 的个人总结图片渲染失败")
+                return
+
+            await self.ctx.send.image(image_base64, stream_id)
+            if self.config.advanced.inject_memory and user_summary_text:
+                note = f"【关于 {query_user_name}（QQ{query_user_id}）{time_range}的个人总结】{user_summary_text}"
+                await self._inject_memory(
+                    stream_id, note, f"plugin:daily_analysis:user:{query_user_id}"
+                )
+        except Exception as e:
+            self.ctx.logger.error(f"后台个人总结异常: {e}", exc_info=True)
+        finally:
+            self._generating.discard(guard_key)
+
     # ==================== 命令：群聊总结 ====================
 
     @Command("summary", description="生成群聊总结", pattern=r"^/summary(?:\s+(?P<args>.*))?$")
@@ -495,30 +551,16 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 await self.ctx.send.text("上一份群聊总结还在生成中，请稍候~", stream_id)
                 return True, "重复请求，生成中", True
             self._generating.add(guard_key)
-            try:
-                await self.ctx.send.text(f"⏳ 正在分析{time_range}的聊天记录，请稍候...", stream_id)
+            await self.ctx.send.text(f"⏳ 正在分析{time_range}的聊天记录，请稍候...", stream_id)
 
-                summary = await self._service.analyze_group_summary(messages, len(messages))
-                if not summary:
-                    self.ctx.logger.error("群聊总结文本生成失败")
-                    return False, "生成总结失败", True
-
-                image_base64 = await self._build_group_summary_image(
-                    messages, summary, time_range, target_date
+            # 创建后台任务，立即返回（不受 60 秒命令超时限制）
+            asyncio.create_task(
+                self._run_group_summary_in_background(
+                    stream_id, group_id, messages, len(messages), time_range, target_date
                 )
-                if not image_base64:
-                    # 按需求：不发文字兜底，仅在 MaiBot 端报错
-                    self.ctx.logger.error(f"群 {group_id} 的群聊总结图片渲染失败")
-                    return False, "图片渲染失败", True
+            )
 
-                await self.ctx.send.image(image_base64, stream_id)
-                if self.config.advanced.inject_memory:
-                    await self._inject_memory(
-                        stream_id, f"【{time_range}群聊总结】{summary}", "plugin:daily_analysis:group"
-                    )
-                return True, "已生成群聊总结", True
-            finally:
-                self._generating.discard(guard_key)
+            return True, "已开始生成群聊总结", True
 
         except Exception as e:
             self.ctx.logger.error(f"执行 /summary 出错: {e}", exc_info=True)
@@ -625,27 +667,19 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 await self.ctx.send.text("上一份个人总结还在生成中，请稍候~", stream_id)
                 return True, "重复请求，生成中", True
             self._generating.add(guard_key)
-            try:
-                await self.ctx.send.text(
-                    f"⏳ 正在分析{query_user_name}的{time_range}发言记录，请稍候...", stream_id
-                )
+            await self.ctx.send.text(
+                f"⏳ 正在分析{query_user_name}的{time_range}发言记录，请稍候...", stream_id
+            )
 
-                image_base64, user_summary_text = await self._build_user_summary_image(
-                    user_messages, query_user_name, query_user_id, target_date
+            # 创建后台任务，立即返回（不受 60 秒命令超时限制）
+            asyncio.create_task(
+                self._run_user_summary_in_background(
+                    stream_id, user_messages, query_user_name,
+                    query_user_id, target_date, time_range, is_self
                 )
-                if not image_base64:
-                    self.ctx.logger.error(f"用户 {query_user_id} 的个人总结图片渲染失败")
-                    return False, "图片渲染失败", True
+            )
 
-                await self.ctx.send.image(image_base64, stream_id)
-                if self.config.advanced.inject_memory and user_summary_text:
-                    note = f"【关于 {query_user_name}（QQ{query_user_id}）{time_range}的个人总结】{user_summary_text}"
-                    await self._inject_memory(
-                        stream_id, note, f"plugin:daily_analysis:user:{query_user_id}"
-                    )
-                return True, "已生成个人总结", True
-            finally:
-                self._generating.discard(guard_key)
+            return True, "已开始生成个人总结", True
 
         except Exception as e:
             self.ctx.logger.error(f"执行 /mysummary 出错: {e}", exc_info=True)
