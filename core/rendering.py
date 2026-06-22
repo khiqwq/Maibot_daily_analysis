@@ -201,12 +201,18 @@ async def prefetch_avatars(qqs: List[str], logger: Any = None) -> Dict[str, str]
         return result
 
     async def _fetch(qq: str, fetch_callable) -> None:
+        # 头像拉不到不再静默换占位图：每个失败都按 qq 记一条日志，失败本身在图里也会显示「获取失败」
         try:
             data_url = await asyncio.wait_for(
                 fetch_callable(qq), timeout=_AVATAR_REQUEST_TIMEOUT
             )
-        except Exception:
+        except Exception as e:
             data_url = ""
+            if logger:
+                logger.warning(f"头像下载失败 qq={qq}: {type(e).__name__}: {e}")
+        else:
+            if not data_url and logger:
+                logger.warning(f"头像下载为空 qq={qq}（服务器返回空内容）")
         _cache_put(qq, data_url)
         if data_url:
             result[qq] = data_url
@@ -251,9 +257,11 @@ async def prefetch_avatars(qqs: List[str], logger: Any = None) -> Dict[str, str]
 class SummaryRenderer:
     """聊天总结图片渲染器（绑定插件 ctx）"""
 
-    def __init__(self, ctx: Any):
+    def __init__(self, ctx: Any, timeout_ms: int = _RENDER_TIMEOUT_MS):
         self.ctx = ctx
         self.logger = ctx.logger
+        # 单次渲染超时（毫秒），可由插件配置覆盖
+        self.timeout_ms = int(timeout_ms) if timeout_ms else _RENDER_TIMEOUT_MS
         self.env = Environment(
             loader=FileSystemLoader(_TEMPLATE_DIR),
             autoescape=select_autoescape(["html", "xml"]),
@@ -280,6 +288,11 @@ class SummaryRenderer:
     async def _render_png_base64(self, html_content: str) -> Optional[str]:
         """通过宿主能力把 HTML 渲染为 PNG，返回纯 base64（失败返回 None）。"""
         html_content = self._inject_fonts(html_content)
+        # render.html2png 是 MaiBot 自带的渲染能力（宿主 src/services/html_render_service.py，
+        # 浏览器由宿主按需自动准备，各 MaiBot 安装都有，无需插件自己找/装 Chrome）。
+        # 当前宿主用 render_timeout_ms 传渲染超时（宿主 cap render.py:91-93 优先读该键）。
+        # 按花叶大人要求不做跨版本兼容兜底：直接用当前 MaiBot 的 render_timeout_ms 单参调用，
+        # 失败就 logger.error 大声报错返回 None。
         try:
             result = await self.ctx.render.html2png(
                 html=html_content,
@@ -289,7 +302,7 @@ class SummaryRenderer:
                 full_page=True,
                 wait_until="load",
                 allow_network=False,
-                timeout_ms=_RENDER_TIMEOUT_MS,
+                render_timeout_ms=self.timeout_ms,
             )
         except Exception as e:
             self.logger.error(f"调用渲染能力异常: {e}", exc_info=True)

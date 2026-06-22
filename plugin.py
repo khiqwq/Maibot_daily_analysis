@@ -84,7 +84,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="2.2.0",
+        default="2.4.0",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -238,11 +238,15 @@ class AdvancedSection(PluginConfigBase):
     __ui_label__ = "高级"
     __ui_icon__ = "settings"
     __ui_order__ = 5
-    model_task: Literal["utils", "planner", "replyer"] = Field(
+    model_task: str = Field(
         default="utils",
-        description="生成总结/分析使用的模型任务。注意：宿主对插件的单次模型调用有约 30 秒硬超时，"
-        "建议用 utils 或 planner（通常是快速非思考模型）；replyer 是主回复模型，若它被配置为思考型模型会很慢、极易超时",
-        json_schema_extra={"label": "模型任务"},
+        description="生成总结/分析使用的【模型任务名】。该任务内配置的模型会按其 model_list 随机/轮询使用。"
+        "建议 utils 或 planner（通常是快速非思考模型）；replyer 是主回复模型，可能较慢、需配合调大 LLM 超时。",
+        json_schema_extra={
+            "label": "模型任务",
+            "hint": "填 MaiBot 的【任务名】(如 utils / planner / replyer / memory)，不是模型名；"
+            "想指定具体模型请在 MaiBot 的 model_config.toml 改该任务的 model_list。填错会自动回退 utils。",
+        },
     )
     inject_memory: bool = Field(
         default=False,
@@ -252,6 +256,17 @@ class AdvancedSection(PluginConfigBase):
             "label": "总结注入麦麦记忆（实验性）",
             "hint": "实验功能，默认关闭；开启后总结内容会进入麦麦记忆",
         },
+    )
+    llm_timeout_seconds: int = Field(
+        default=60,
+        description="单次 LLM 调用的最长等待时间（秒），到点放弃该次分析项。"
+        "注意：宿主对插件的单次能力调用约有 30 秒 RPC 硬上限，设置大于 30 通常不会有额外效果。",
+        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 60；受宿主约 30 秒 RPC 上限约束"},
+    )
+    render_timeout_seconds: int = Field(
+        default=25,
+        description="单次图片渲染的超时时间（秒）。图片较复杂或机器较慢时可适当调大。",
+        json_schema_extra={"label": "图片渲染超时（秒）", "hint": "默认 25"},
     )
 
 
@@ -280,27 +295,89 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         self._last_auto_date: Optional[date] = None
         # 正在生成总结的任务标识，防止同一会话/用户并发刷命令
         self._generating: set = set()
+        # 后台总结任务集合（命令秒回、重活后台跑）；on_unload 时统一取消
+        self._bg_tasks: set = set()
 
     # ---------- 生命周期 ----------
 
     async def on_load(self) -> None:
-        self._service = AnalysisService(self.ctx, self.config.advanced.model_task)
-        self._renderer = SummaryRenderer(self.ctx)
+        adv = self.config.advanced
+        model_task = await self._validated_model_task()
+        self._service = AnalysisService(self.ctx, model_task, adv.llm_timeout_seconds)
+        self._renderer = SummaryRenderer(self.ctx, self._render_timeout_ms())
         self._start_scheduler()
         self.ctx.logger.info(
-            f"每日分析插件已加载（分析模型任务: {self.config.advanced.model_task}）"
+            f"每日分析插件已加载（模型任务: {model_task}，LLM超时: {adv.llm_timeout_seconds}s，"
+            f"渲染超时: {adv.render_timeout_seconds}s）"
         )
+
+    def _render_timeout_ms(self) -> int:
+        return max(5, int(self.config.advanced.render_timeout_seconds or 25)) * 1000
+
+    async def _validated_model_task(self) -> str:
+        """校验配置的模型任务名是否为宿主可用任务；非法（如误填模型名）则回退 utils 并告警。
+
+        ctx.llm.generate(model=...) 只接受【任务名】(resolve_task_name 对未知名抛 ValueError)，
+        因此这里在加载/热更新时主动校验，避免误填导致每次分析静默失败。
+        """
+        want = (self.config.advanced.model_task or "utils").strip() or "utils"
+        try:
+            res = await self.ctx.llm.get_available_models()
+            models = res.get("models") if isinstance(res, dict) else res
+            if isinstance(models, list) and models:
+                if want in models:
+                    return want
+                fallback = "utils" if "utils" in models else str(models[0])
+                self.ctx.logger.warning(
+                    f"配置的模型任务 '{want}' 不在可用任务列表 {models} 中"
+                    f"（只能填任务名、不能填模型名），已回退到 '{fallback}'"
+                )
+                return fallback
+        except Exception as e:
+            self.ctx.logger.warning(f"校验模型任务可用性失败，按配置值 '{want}' 使用: {e}")
+        return want
 
     async def on_unload(self) -> None:
         await self._stop_scheduler()
+        await self._cancel_bg_tasks()
         self.ctx.logger.info("每日分析插件已卸载")
+
+    def _spawn_bg(self, coro: Any) -> None:
+        """创建并跟踪后台任务；完成后自动移除引用。命令秒回、重活放后台跑，
+        绕开宿主对命令处理的 60 秒硬超时；任务集合在 on_unload 时统一取消。"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _cancel_bg_tasks(self) -> None:
+        """卸载（on_unload）时取消所有未完成的后台总结任务并等待退出。
+
+        注意：热重载（on_config_update）不调用本方法、也不取消在途任务——它只原地
+        更新 _service/_renderer 的属性，在途任务持有同一对象引用、用的是不可变快照，
+        属良性不一致；故意不在保存配置时掐断用户刚发起的 /summary。
+        """
+        tasks = list(self._bg_tasks)
+        self._bg_tasks.clear()
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.ctx.logger.warning(f"后台任务清理时异常: {e}")
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
         if scope != "self":
             return
-        # 同步分析模型任务
+        # 同步分析模型任务与超时设置
         if self._service is not None:
-            self._service.model = self.config.advanced.model_task
+            self._service.model = await self._validated_model_task()
+            self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 60))
+        if self._renderer is not None:
+            self._renderer.timeout_ms = self._render_timeout_ms()
         # 自动总结配置可能变化，重启调度器
         await self._stop_scheduler()
         self._start_scheduler()
@@ -372,7 +449,37 @@ class DailyAnalysisPlugin(MaiBotPlugin):
     # ---------- 消息查询与归一化 ----------
 
     @staticmethod
-    def _normalize_message(m: dict) -> Optional[dict]:
+    def _text_from_segments(raw_message: list) -> str:
+        """从 raw_message 段重建发言者本人的文本：仅取 text 段（at 段渲染为 @名字），
+        刻意跳过 reply 段（被引用的原消息）。
+
+        背景（真机验证）：当 B 回复 A 时，宿主会把『被引用的原消息文本』拼到 B 的
+        processed_plain_text 前面（见宿主 src/chat/message_receive/message.py 的
+        process_reply_component），导致 A 的话被误记成 B 所说。改从 raw_message 的
+        text/at 段重建即可只拿到 B 本人的话。
+        """
+        parts: List[str] = []
+        for seg in raw_message:
+            if not isinstance(seg, dict):
+                continue
+            stype = seg.get("type")
+            data = seg.get("data")
+            if stype == "text" and isinstance(data, str):
+                parts.append(data)
+            elif stype == "at" and isinstance(data, dict):
+                name = (
+                    data.get("target_user_cardname")
+                    or data.get("target_user_nickname")
+                    or data.get("target_user_id")
+                    or ""
+                )
+                if name:
+                    parts.append(f"@{name}")
+            # 跳过 reply / image / emoji / voice / forward 等段
+        return " ".join(p for p in parts if p).strip()
+
+    @classmethod
+    def _normalize_message(cls, m: dict) -> Optional[dict]:
         """把新 SDK 的嵌套消息 dict 归一化为分析层需要的扁平结构"""
         if not isinstance(m, dict):
             return None
@@ -386,11 +493,25 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         # 丢弃非法/缺失时间戳的消息：datetime.fromtimestamp(<=0) 在 Windows 会抛 OSError
         if ts <= 0:
             return None
+
+        # 回复消息文本修正：若该消息含 reply 段，宿主会把被引用的原消息文本拼进
+        # processed_plain_text，故改用 raw_message 的 text/at 段重建发言者本人的话；
+        # 非回复消息沿用 processed_plain_text（行为完全不变）。
+        raw_segments = m.get("raw_message") or []
+        has_reply = any(
+            isinstance(s, dict) and s.get("type") == "reply" for s in raw_segments
+        )
+        text = (
+            cls._text_from_segments(raw_segments)
+            if has_reply
+            else (m.get("processed_plain_text") or "")
+        )
+
         return {
             "user_id": str(uinfo.get("user_id") or ""),
             "user_nickname": uinfo.get("user_nickname") or "未知用户",
             "user_cardname": uinfo.get("user_cardname") or "",
-            "processed_plain_text": m.get("processed_plain_text") or "",
+            "processed_plain_text": text,
             "time": ts,
             "is_command": bool(m.get("is_command")),
             "is_notify": bool(m.get("is_notify")),
@@ -456,6 +577,58 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         # 黑名单：列表内禁用，其余允许
         return gid not in target_chats
 
+    # ==================== 后台总结任务（命令秒回，重活后台跑） ====================
+
+    async def _run_group_summary_in_background(
+        self, stream_id: str, group_id: str, messages: List[dict],
+        time_range: str, target_date: datetime, guard_key: str,
+    ) -> None:
+        """后台执行群聊总结：分析→渲染→发送。不受宿主对命令处理的 60 秒硬超时限制。"""
+        try:
+            summary = await self._service.analyze_group_summary(messages, len(messages))
+            if not summary:
+                self.ctx.logger.error(f"群 {group_id} 群聊总结文本生成失败")
+                return
+            image_base64 = await self._build_group_summary_image(
+                messages, summary, time_range, target_date
+            )
+            if not image_base64:
+                # 按需求：不发文字兜底，仅在 MaiBot 端报错
+                self.ctx.logger.error(f"群 {group_id} 的群聊总结图片渲染失败")
+                return
+            await self.ctx.send.image(image_base64, stream_id)
+            if self.config.advanced.inject_memory:
+                await self._inject_memory(
+                    stream_id, f"【{time_range}群聊总结】{summary}", "plugin:daily_analysis:group"
+                )
+        except Exception as e:
+            self.ctx.logger.error(f"后台群聊总结异常 (群 {group_id}): {e}", exc_info=True)
+        finally:
+            self._generating.discard(guard_key)
+
+    async def _run_user_summary_in_background(
+        self, stream_id: str, user_messages: List[dict], query_user_name: str,
+        query_user_id: str, time_range: str, target_date: datetime, guard_key: str,
+    ) -> None:
+        """后台执行个人总结：分析→渲染→发送。不受宿主对命令处理的 60 秒硬超时限制。"""
+        try:
+            image_base64, user_summary_text = await self._build_user_summary_image(
+                user_messages, query_user_name, query_user_id, target_date
+            )
+            if not image_base64:
+                self.ctx.logger.error(f"用户 {query_user_id} 的个人总结图片渲染失败")
+                return
+            await self.ctx.send.image(image_base64, stream_id)
+            if self.config.advanced.inject_memory and user_summary_text:
+                note = f"【关于 {query_user_name}（QQ{query_user_id}）{time_range}的个人总结】{user_summary_text}"
+                await self._inject_memory(
+                    stream_id, note, f"plugin:daily_analysis:user:{query_user_id}"
+                )
+        except Exception as e:
+            self.ctx.logger.error(f"后台个人总结异常 (用户 {query_user_id}): {e}", exc_info=True)
+        finally:
+            self._generating.discard(guard_key)
+
     # ==================== 命令：群聊总结 ====================
 
     @Command("summary", description="生成群聊总结", pattern=r"^/summary(?:\s+(?P<args>.*))?$")
@@ -495,30 +668,21 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 await self.ctx.send.text("上一份群聊总结还在生成中，请稍候~", stream_id)
                 return True, "重复请求，生成中", True
             self._generating.add(guard_key)
+            # 守护键已加，但后台任务尚未接管；这中间的 send.text 是 RPC 调用可能抛异常，
+            # 必须保证「只有后台任务（其 finally 会 discard）真正创建后，守护键才处于已添加状态」，
+            # 否则 send.text 失败会让 guard_key 永久滞留，该群命令被永久判为「生成中」。
             try:
                 await self.ctx.send.text(f"⏳ 正在分析{time_range}的聊天记录，请稍候...", stream_id)
-
-                summary = await self._service.analyze_group_summary(messages, len(messages))
-                if not summary:
-                    self.ctx.logger.error("群聊总结文本生成失败")
-                    return False, "生成总结失败", True
-
-                image_base64 = await self._build_group_summary_image(
-                    messages, summary, time_range, target_date
-                )
-                if not image_base64:
-                    # 按需求：不发文字兜底，仅在 MaiBot 端报错
-                    self.ctx.logger.error(f"群 {group_id} 的群聊总结图片渲染失败")
-                    return False, "图片渲染失败", True
-
-                await self.ctx.send.image(image_base64, stream_id)
-                if self.config.advanced.inject_memory:
-                    await self._inject_memory(
-                        stream_id, f"【{time_range}群聊总结】{summary}", "plugin:daily_analysis:group"
+                # 重活放后台执行，命令立即返回，避免宿主对命令处理的 60 秒硬超时把整轮分析掐断
+                self._spawn_bg(
+                    self._run_group_summary_in_background(
+                        stream_id, group_id, messages, time_range, target_date, guard_key
                     )
-                return True, "已生成群聊总结", True
-            finally:
-                self._generating.discard(guard_key)
+                )
+            except Exception:
+                self._generating.discard(guard_key)  # 后台任务未接管，回收守护键
+                raise  # 交外层 except 记日志（exc_info）
+            return True, "已开始生成群聊总结", True
 
         except Exception as e:
             self.ctx.logger.error(f"执行 /summary 出错: {e}", exc_info=True)
@@ -625,27 +789,23 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 await self.ctx.send.text("上一份个人总结还在生成中，请稍候~", stream_id)
                 return True, "重复请求，生成中", True
             self._generating.add(guard_key)
+            # 同 cmd_summary：守护键已加但后台任务未接管，send.text 可能抛异常，
+            # 失败时必须回收 guard_key，否则该用户命令被永久判为「生成中」。
             try:
                 await self.ctx.send.text(
                     f"⏳ 正在分析{query_user_name}的{time_range}发言记录，请稍候...", stream_id
                 )
-
-                image_base64, user_summary_text = await self._build_user_summary_image(
-                    user_messages, query_user_name, query_user_id, target_date
-                )
-                if not image_base64:
-                    self.ctx.logger.error(f"用户 {query_user_id} 的个人总结图片渲染失败")
-                    return False, "图片渲染失败", True
-
-                await self.ctx.send.image(image_base64, stream_id)
-                if self.config.advanced.inject_memory and user_summary_text:
-                    note = f"【关于 {query_user_name}（QQ{query_user_id}）{time_range}的个人总结】{user_summary_text}"
-                    await self._inject_memory(
-                        stream_id, note, f"plugin:daily_analysis:user:{query_user_id}"
+                # 重活放后台执行，命令立即返回，避免宿主对命令处理的 60 秒硬超时把整轮分析掐断
+                self._spawn_bg(
+                    self._run_user_summary_in_background(
+                        stream_id, user_messages, query_user_name, query_user_id,
+                        time_range, target_date, guard_key
                     )
-                return True, "已生成个人总结", True
-            finally:
-                self._generating.discard(guard_key)
+                )
+            except Exception:
+                self._generating.discard(guard_key)  # 后台任务未接管，回收守护键
+                raise  # 交外层 except 记日志（exc_info）
+            return True, "已开始生成个人总结", True
 
         except Exception as e:
             self.ctx.logger.error(f"执行 /mysummary 出错: {e}", exc_info=True)
