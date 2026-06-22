@@ -33,10 +33,14 @@ _MULTI_USER_JSON_MAX_TOKENS = 2500
 # LLM 输入消息上限：取最近 N 条参与总结/话题/金句，避免超大群 prompt 过长拖慢生成
 _MAX_INPUT_MESSAGES = 400
 
-# 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽 30 秒超时预算"。
+# 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
 _LLM_MAX_CONCURRENCY = 2
 
-# 默认模型任务：utils 对应快速非思考模型，适合在 30 秒 RPC 超时内完成
+# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。注意：宿主对插件的单次能力调用
+# 约有 30 秒 RPC 硬上限，设大于 30 通常无额外效果；此值仅作客户端侧的等待上限。
+_DEFAULT_CALL_TIMEOUT_S = 60
+
+# 默认模型任务：utils 对应快速非思考模型，速度快、稳定
 _DEFAULT_MODEL_TASK = "utils"
 
 
@@ -62,11 +66,18 @@ class AnalysisService:
         flags=re.UNICODE,
     )
 
-    def __init__(self, ctx: Any, model: str = _DEFAULT_MODEL_TASK):
+    def __init__(
+        self,
+        ctx: Any,
+        model: str = _DEFAULT_MODEL_TASK,
+        call_timeout_s: int = _DEFAULT_CALL_TIMEOUT_S,
+    ):
         self.ctx = ctx
         self.logger = ctx.logger
         # 模型任务名（可由插件配置覆盖）。默认 utils=快速模型，确保 30 秒内返回
         self.model = model or _DEFAULT_MODEL_TASK
+        # 单次 LLM 调用的客户端等待上限（秒），可由插件配置覆盖
+        self.call_timeout_s = max(5, int(call_timeout_s or _DEFAULT_CALL_TIMEOUT_S))
         # 限制并发 LLM 调用数：每个能力调用有约 30 秒 RPC 硬超时，若上游串行处理，
         # 一次放出过多调用会让排队靠后的调用把等待时间算进自己的超时预算而被掐断。
         # 信号量在"真正发起 ctx.llm.generate 之前"获取，确保每次调用的 30 秒计时
@@ -86,12 +97,18 @@ class AnalysisService:
         """调用宿主 LLM 能力，成功返回文本，失败返回 None"""
         try:
             async with self._llm_semaphore:
-                result = await self.ctx.llm.generate(
-                    prompt,
-                    model=self.model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                result = await asyncio.wait_for(
+                    self.ctx.llm.generate(
+                        prompt,
+                        model=self.model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=self.call_timeout_s,
                 )
+        except asyncio.TimeoutError:
+            self.logger.warning(f"LLM 调用超时 ({request_type}, >{self.call_timeout_s}s)")
+            return None
         except Exception as e:
             self.logger.error(f"LLM 调用异常 ({request_type}): {e}", exc_info=True)
             return None
